@@ -1,0 +1,81 @@
+# Deploy CognizantWeatherApp to Azure App Service
+# Triggers on every push to main branch.
+#
+# Required GitHub Secrets:
+#   AZURE_WEBAPP_NAME          — your Azure App Service name
+#   AZURE_WEBAPP_PUBLISH_PROFILE — download from Azure Portal
+#   OWM_API_KEY                — OpenWeatherMap API key
+#   SECRET_KEY                 — Flask secret key
+
+name: Deploy to Azure Web App
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ──────────────────────────────────────
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      # ── 3. Install dependencies ───────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+          pip install gunicorn         # production WSGI server
+
+      # ── 4. Create .env for deployment ────────────────────────
+      #    App settings are injected as GitHub Secrets and written
+      #    to a .env file that Flask/python-dotenv will load.
+      - name: Create backend .env
+        run: |
+          cat > backend/.env <<EOF
+          OWM_API_KEY=${{ secrets.OWM_API_KEY }}
+          SECRET_KEY=${{ secrets.SECRET_KEY }}
+          FLASK_DEBUG=false
+          CACHE_TTL_SECONDS=600
+          EOF
+
+      # ── 5. Zip artefact (exclude dev-only dirs) ──────────────
+      - name: Zip application for deployment
+        run: |
+          zip -r release.zip . \
+            --exclude "*.git*" \
+            --exclude "*__pycache__*" \
+            --exclude "*.pyc" \
+            --exclude "venv/*" \
+            --exclude ".env.example"
+
+      # ── 6. Deploy to Azure App Service ───────────────────────
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: release.zip
+          startup-command: >
+            gunicorn
+            --bind=0.0.0.0:8000
+            --workers=2
+            --timeout=60
+            --chdir backend
+            "app:create_app()"
